@@ -1,0 +1,61 @@
+version: "3.9"
+
+services:
+  db:
+    image: postgres:15
+    container_name: id_verificator_db
+    environment:
+      POSTGRES_DB: id_verificator
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: always
+
+  redis:
+    image: redis:7
+    container_name: id_verificator_redis
+    ports:
+      - "6379:6379"
+    restart: always
+
+  web:
+    build: .
+    container_name: id_verificator_web
+    command: bash -c "python manage.py migrate && python manage.py runserver 0.0.0.0:8001"
+    volumes:
+      - .:/app
+      - ./src/media:/app/media
+    environment:
+      DJANGO_SETTINGS_MODULE: id_verificator.settings
+      PYTHONPATH: /app/src
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+    ports:
+      - "8001:8001"
+    depends_on:
+      - db
+      - redis
+    restart: always
+
+  worker:
+    build: .
+    container_name: id_verificator_worker
+    command: celery -A id_verificator worker --loglevel=info
+    volumes:
+      - .:/app
+      - ./src/media:/app/media
+    environment:
+      DJANGO_SETTINGS_MODULE: id_verificator.settings
+      PYTHONPATH: /app/src
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+    depends_on:
+      - db
+      - redis
+    restart: always
+
+volumes:
+  postgres_data:
