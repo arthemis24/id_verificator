@@ -1,10 +1,27 @@
 from celery import shared_task
 from verification.models import Document
-from deepface import DeepFace
+
 import os
+
+
+def run_face_verification(doc_path, selfie_path):
+    from deepface import DeepFace
+    try:
+        result = DeepFace.verify(img1_path=doc_path, img2_path=selfie_path)
+        return {
+            "verified": result.get("verified", False),
+            "score": result.get("distance", 0.0)
+        }
+    except Exception as e:
+        return {
+            "verified": False,
+            "score": 0.0,
+            "error": str(e)
+        }
 
 @shared_task
 def verify_document(document_id):
+    from deepface import DeepFace
     """
     Vérifie le document et le selfie associé via DeepFace.
     Retourne un dictionnaire contenant:

@@ -19,3 +19,7 @@ pytesseract = "^0.3.12"
 [tool.poetry.dev-dependencies]
 pytest = "^8.0"
 pytest-django = "^4.5"
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "id_verificator.settings"
+python_files = ["tests.py", "test_*.py", "*_tests.py"]
