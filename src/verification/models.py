@@ -7,8 +7,6 @@ import uuid
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MB
 
 
-import uuid
-
 def user_directory_path(instance, filename):
     ext = filename.split('.')[-1]
     filename = f"{uuid.uuid4().hex}.{ext}"
@@ -32,6 +30,7 @@ def selfie_upload_path(instance, filename):
 
 def document_upload_path(instance, filename):
    return f"documents/user_{instance.user.id}/{filename}"
+
 
 class Document(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE)

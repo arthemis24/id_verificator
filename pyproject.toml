@@ -2,12 +2,15 @@
 name = "id_verificator"
 version = "0.1.0"
 description = "Agent IA pour verification d'identité via API"
-authors = ["Roddy MBOGNING <roddy@example.com>"]
+authors = ["Roddy MBOGNING <rmbogning@gmail.com>"]
 
 [tool.poetry.dependencies]
 python = "^3.12"
 Django = "^5.2"
 djangorestframework = "^3.14"
+djangorestframework-simplejwt = "^5.3"
+pdf2image = "^1.17"
+drf-spectacular = "^0.28"
 psycopg2-binary = "^2.9"
 celery = "^5.3"
 redis = "^5.0"
@@ -21,5 +24,5 @@ pytest = "^8.0"
 pytest-django = "^4.5"
 
 [tool.pytest.ini_options]
-DJANGO_SETTINGS_MODULE = "id_verificator.settings"
+DJANGO_SETTINGS_MODULE = "id_verificator.settings_test"
 python_files = ["tests.py", "test_*.py", "*_tests.py"]

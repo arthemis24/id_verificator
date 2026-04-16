@@ -1,1 +1,23 @@
+# Virtual environments
 .venv/
+venv/
+
+# Secrets — never commit these
+.env
+*.env
+
+# Django
+*.pyc
+__pycache__/
+local.db
+media/
+staticfiles/
+
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Editor
+.vscode/settings.json
+*.code-workspace
