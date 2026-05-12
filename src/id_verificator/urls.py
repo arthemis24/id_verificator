@@ -1,5 +1,7 @@
 from django.contrib import admin
-from django.urls import path, include
+from django.urls import path, include, re_path
+from verification.media_views import ProtectedMediaView
+from verification.throttles import LoginRateThrottle
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView, SpectacularRedocView
 from drf_spectacular.utils import extend_schema, OpenApiExample, OpenApiResponse
@@ -47,7 +49,7 @@ from rest_framework_simplejwt.serializers import (
     },
 )
 class AnnotatedTokenObtainPairView(TokenObtainPairView):
-    pass
+    throttle_classes = [LoginRateThrottle]
 
 
 @extend_schema(
@@ -99,4 +101,7 @@ urlpatterns = [
     path('api/schema/', SpectacularAPIView.as_view(), name='schema'),
     path('api/docs/', SpectacularSwaggerView.as_view(url_name='schema'), name='swagger-ui'),
     path('api/redoc/', SpectacularRedocView.as_view(url_name='schema'), name='redoc'),
+
+    # Protected media — requires JWT + document ownership
+    re_path(r'^media/(?P<path>.+)$', ProtectedMediaView.as_view(), name='protected-media'),
 ]

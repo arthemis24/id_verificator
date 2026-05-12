@@ -20,6 +20,7 @@ from .serializers import (
     ValidationErrorSerializer,
 )
 from verification.tasks import verify_document
+from verification.throttles import UploadRateThrottle
 
 
 @extend_schema(tags=["Verification"])
@@ -40,10 +41,42 @@ class VerificationView(APIView):
     """
 
     permission_classes = [IsAuthenticated]
+    throttle_classes = [UploadRateThrottle]
     parser_classes = [MultiPartParser, FormParser]
 
     @extend_schema(
         summary="Submit an identity verification",
+        description=(
+            "Upload an ID document + selfie to start an async verification.\n\n"
+            "**Webhook (optional)**\n\n"
+            "Supply a `callback_url` and the server will POST the full result to that URL "
+            "as soon as the task completes — no polling needed.\n\n"
+            "Expected payload delivered to your endpoint:\n"
+            "```json\n"
+            "{\n"
+            '  "document_id": 42,\n'
+            '  "subject": {\n'
+            '    "first_name": "MOMM",\n'
+            '    "last_name": "HER MANN",\n'
+            '    "birth_date": "1992-07-19",\n'
+            '    "document_type": "passport",\n'
+            '    "user_id": 3,\n'
+            '    "username": "testuser"\n'
+            "  },\n"
+            '  "submitted_at": "2026-04-18T10:00:00+00:00",\n'
+            '  "result": {\n'
+            '    "verified": true,\n'
+            '    "face_verified": true,\n'
+            '    "face_score": 0.032,\n'
+            '    "ocr_verified": true,\n'
+            '    "ocr_data": { "..." : "..." }\n'
+            "  }\n"
+            "}\n"
+            "```\n\n"
+            "Delivery is retried up to **3 times** with exponential back-off (1 s → 2 s → 4 s) "
+            "on network errors. Your endpoint should return any `2xx` status to acknowledge receipt.\n\n"
+            "If no `callback_url` is provided, poll `GET /api/verify/{id}/status/` instead."
+        ),
         request={
             "multipart/form-data": VerificationSerializer,
         },
@@ -52,22 +85,32 @@ class VerificationView(APIView):
                 response=VerificationAcceptedSerializer,
                 description=(
                     "Files accepted. Verification is running asynchronously. "
-                    "Use `document_id` to poll the status endpoint."
+                    "If `callback_url` was supplied, the result will be POSTed there. "
+                    "Otherwise poll the status endpoint with `document_id`."
                 ),
                 examples=[
                     OpenApiExample(
-                        "Accepted",
+                        "Accepted — without webhook",
                         value={
                             "message": "Fichiers uploadés et vérification en cours",
                             "document_id": 42,
                         },
                         response_only=True,
-                    )
+                    ),
+                    OpenApiExample(
+                        "Accepted — with webhook",
+                        value={
+                            "message": "Fichiers uploadés et vérification en cours",
+                            "document_id": 42,
+                            "callback_url": "https://your-app.com/hooks/id-result",
+                        },
+                        response_only=True,
+                    ),
                 ],
             ),
             400: OpenApiResponse(
                 response=ValidationErrorSerializer,
-                description="Validation error — missing field, bad file type, or file too large.",
+                description="Validation error — missing field, bad file type, file too large, or invalid callback URL.",
                 examples=[
                     OpenApiExample(
                         "Missing selfie",
@@ -88,9 +131,24 @@ class VerificationView(APIView):
                         value={"doc_file": ["Taille maximale du fichier: 5.0 MB"]},
                         response_only=True,
                     ),
+                    OpenApiExample(
+                        "Invalid callback URL",
+                        value={"callback_url": ["Enter a valid URL."]},
+                        response_only=True,
+                    ),
                 ],
             ),
             401: OpenApiResponse(description="Authentication credentials were not provided or are invalid."),
+            429: OpenApiResponse(
+                description="Rate limit exceeded. Maximum 20 verification requests per hour per user.",
+                examples=[
+                    OpenApiExample(
+                        "Too many requests",
+                        value={"detail": "Request was throttled. Expected available in 3540 seconds."},
+                        response_only=True,
+                    )
+                ],
+            ),
         },
     )
     def post(self, request, *args, **kwargs):
@@ -101,13 +159,13 @@ class VerificationView(APIView):
         if serializer.is_valid():
             doc = serializer.save()
             verify_document.delay(doc.id)
-            return Response(
-                {
-                    "message": "Fichiers uploadés et vérification en cours",
-                    "document_id": doc.id,
-                },
-                status=status.HTTP_202_ACCEPTED,
-            )
+            body = {
+                "message": "Fichiers uploadés et vérification en cours",
+                "document_id": doc.id,
+            }
+            if doc.callback_url:
+                body["callback_url"] = doc.callback_url
+            return Response(body, status=status.HTTP_202_ACCEPTED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 

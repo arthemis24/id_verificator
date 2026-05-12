@@ -1,64 +1,47 @@
+"""
+verification.tasks
+~~~~~~~~~~~~~~~~~~
+Celery task definitions.
+
+Responsibility: scheduling, DB persistence, and webhook dispatch only.
+All business logic lives in verification.services.
+"""
+
+import json
+import logging
 import os
+import time
+import urllib.error
+import urllib.request
+
 from celery import shared_task
+
 from verification.models import Document
+from verification.services import (
+    build_verification_result,
+    check_ocr_name_match,
+    run_face_verification,
+    run_ocr,
+)
 
-
-def _check_ocr_match(doc: Document, ocr_data: dict) -> tuple[bool, dict]:
-    """
-    Two-level name check:
-
-    Level 1 — label extraction:
-        If OCR found a labelled NOM/PRENOM field, compare it directly
-        against the submitted value.
-
-    Level 2 — full-text presence (fallback):
-        If no labelled field was found, normalize both the submitted name
-        and the entire OCR text and check whether the name appears anywhere
-        in the concatenated text.
-
-    A field with no OCR data at all (empty raw_text) is skipped.
-
-    Returns (match: bool, detail: dict).
-    """
-    from verification.ai_utils import names_present_in_text, _normalize
-
-    raw_text   = ocr_data.get("raw_text", "")
-    label_first = ocr_data.get("first_name")
-    label_last  = ocr_data.get("last_name")
-    detail      = {"method": None}
-
-    # ── Level 1: labelled fields found ───────────────────────────────────────
-    if label_first is not None or label_last is not None:
-        detail["method"] = "label"
-        first_ok = (label_first is None) or (_normalize(label_first) == _normalize(doc.first_name))
-        last_ok  = (label_last  is None) or (_normalize(label_last)  == _normalize(doc.last_name))
-        detail.update({"first_name_match": first_ok, "last_name_match": last_ok})
-        return (first_ok and last_ok), detail
-
-    # ── Level 2: no labels — search full text ────────────────────────────────
-    if not raw_text.strip():
-        # OCR produced nothing — skip name check entirely
-        detail["method"] = "skipped_no_text"
-        return True, detail
-
-    detail["method"] = "fulltext"
-    match, presence = names_present_in_text(doc.first_name, doc.last_name, raw_text)
-    detail.update(presence)
-    return match, detail
+logger = logging.getLogger(__name__)
 
 
 @shared_task
 def verify_document(document_id: int) -> dict:
     """
-    Async task that runs:
-      1. OCR on the uploaded ID document → two-level name check + date extraction
-      2. DeepFace face comparison between the document photo and the selfie
+    Async task: orchestrate OCR + face verification for a submitted document.
 
-    Stores the result in Document.verification_result and sets Document.verified.
+    1. Fetch the Document from the database.
+    2. Delegate OCR and face comparison to the service layer.
+    3. Persist the aggregated result.
+    4. Fire the webhook if a callback_url was provided.
     """
+    logger.info("verify_document started: document_id=%s", document_id)
     try:
         doc = Document.objects.get(id=document_id)
     except Document.DoesNotExist:
+        logger.error("verify_document: document_id=%s not found", document_id)
         return {"verified": False, "error": "Document introuvable"}
 
     doc_path    = doc.doc_file.path
@@ -71,62 +54,73 @@ def verify_document(document_id: int) -> dict:
         doc.save()
         return result
 
-    # ── OCR ──────────────────────────────────────────────────────────────────
-    from verification.ai_utils import ocr_extract_info
-    ocr_data           = ocr_extract_info(doc_path)
-    ocr_match, ocr_detail = _check_ocr_match(doc, ocr_data)
+    ocr_data             = run_ocr(doc_path)
+    ocr_match, ocr_detail = check_ocr_name_match(doc, ocr_data)
+    face                 = run_face_verification(doc_path, selfie_path)
+    result               = build_verification_result(ocr_data, ocr_match, ocr_detail, face)
 
-    # ── Face verification ─────────────────────────────────────────────────────
-    from django.conf import settings as django_settings
-    face_model     = getattr(django_settings, "FACE_MODEL",     "VGG-Face")
-    face_threshold = getattr(django_settings, "FACE_THRESHOLD", None)
-    if face_threshold is not None:
-        try:
-            face_threshold = float(face_threshold)
-        except (ValueError, TypeError):
-            face_threshold = None
-
-    try:
-        from deepface import DeepFace
-        verify_kwargs = dict(
-            img1_path=doc_path,
-            img2_path=selfie_path,
-            model_name=face_model,
-            enforce_detection=False,
-        )
-        if face_threshold is not None:
-            verify_kwargs["threshold"] = face_threshold
-
-        face_result   = DeepFace.verify(**verify_kwargs)
-        face_verified = face_result.get("verified", False)
-        face_score    = face_result.get("distance", 0.0)
-        face_error    = None
-    except Exception as e:
-        face_verified = False
-        face_score    = 0.0
-        face_error    = str(e)
-
-    # ── Aggregate ─────────────────────────────────────────────────────────────
-    verification_result = {
-        "verified":      face_verified and ocr_match,
-        "face_verified": face_verified,
-        "face_score":    face_score,
-        "ocr_verified":  ocr_match,
-        "ocr_data": {
-            "first_name":    ocr_data.get("first_name"),
-            "last_name":     ocr_data.get("last_name"),
-            "birth_date":    ocr_data.get("birth_date"),
-            "name_check":    ocr_detail,
-            "raw_text":      ocr_data.get("raw_text", ""),
-        },
-    }
-    if face_error:
-        verification_result["face_error"] = face_error
-    if "error" in ocr_data:
-        verification_result["ocr_error"] = ocr_data["error"]
-
-    doc.verification_result = verification_result
-    doc.verified = verification_result["verified"]
+    doc.verification_result = result
+    doc.verified = result["verified"]
     doc.save()
 
-    return verification_result
+    logger.info(
+        "verify_document complete: document_id=%s verified=%s face_score=%.4f ocr_verified=%s",
+        document_id,
+        result["verified"],
+        result.get("face_score", 0.0),
+        result.get("ocr_verified"),
+    )
+
+    if doc.callback_url:
+        _dispatch_webhook(doc.callback_url, document_id, doc, result)
+
+    return result
+
+
+def _dispatch_webhook(
+    url: str,
+    document_id: int,
+    doc: Document,
+    result: dict,
+    max_retries: int = 3,
+) -> None:
+    """
+    POST the verification result to the caller-supplied callback URL.
+    Retries up to max_retries times with exponential back-off (1 s, 2 s, 4 s).
+    Never raises — failures must not affect the task's return value.
+    """
+    payload = json.dumps({
+        "document_id": document_id,
+        "subject": {
+            "first_name":    doc.first_name,
+            "last_name":     doc.last_name,
+            "birth_date":    str(doc.birth_date),
+            "document_type": doc.document_type,
+            "user_id":       doc.user_id,
+            "username":      doc.user.username,
+        },
+        "submitted_at": doc.created_at.isoformat(),
+        "result": result,
+    }).encode()
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            req = urllib.request.Request(
+                url,
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                logger.info("Webhook delivered to %s (HTTP %s)", url, resp.status)
+                return
+        except (urllib.error.URLError, OSError) as exc:
+            logger.warning(
+                "Webhook attempt %d/%d failed for %s: %s", attempt, max_retries, url, exc
+            )
+            if attempt < max_retries:
+                time.sleep(2 ** (attempt - 1))
+
+    logger.error(
+        "Webhook delivery permanently failed for document %s → %s", document_id, url
+    )

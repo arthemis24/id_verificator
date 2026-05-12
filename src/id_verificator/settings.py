@@ -27,6 +27,31 @@ REST_FRAMEWORK = {
         'rest_framework_simplejwt.authentication.JWTAuthentication',
     ],
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+    # Production: disable the Browsable API — it leaks endpoint structure and
+    # accepts session-based auth which bypasses our JWT-only policy.
+    'DEFAULT_RENDERER_CLASSES': [
+        'rest_framework.renderers.JSONRenderer',
+    ],
+    'DEFAULT_THROTTLE_CLASSES': [
+        'rest_framework.throttling.AnonRateThrottle',
+        'rest_framework.throttling.UserRateThrottle',
+    ],
+    'DEFAULT_THROTTLE_RATES': {
+        'anon':   '60/minute',
+        'user':   '300/minute',
+        'login':  '5/minute',
+        'upload': '20/hour',
+    },
+}
+
+# DRF throttling requires a cache backend.
+# Production uses Redis (shared across all gunicorn workers + Celery nodes).
+# settings_local.py and settings_test.py override this with LocMemCache / DummyCache.
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.redis.RedisCache",
+        "LOCATION": os.environ.get("REDIS_URL", "redis://localhost:6379/1"),
+    }
 }
 
 SPECTACULAR_SETTINGS = {
@@ -90,19 +115,137 @@ DATABASES = {
     }
 }
 
-AUTH_PASSWORD_VALIDATORS = []
+AUTH_PASSWORD_VALIDATORS = [
+    {'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator'},
+    {'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator',
+     'OPTIONS': {'min_length': 10}},
+    {'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator'},
+    {'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator'},
+]
 
 LANGUAGE_CODE = 'en-us'
 TIME_ZONE = 'UTC'
 USE_I18N = True
 USE_TZ = True
+
 STATIC_URL = '/static/'
+STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
 
 MEDIA_URL = '/media/'
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
+
+# ── Security headers ──────────────────────────────────────────────────────────
+#
+# These are enforced by Django's SecurityMiddleware (already first in
+# MIDDLEWARE). Each setting adds one HTTP response header that instructs
+# browsers on how to handle the response safely.
+
+# Prevent MIME-type sniffing: tells the browser to trust the declared
+# Content-Type and not guess. Stops IE/Chrome from executing a JS file
+# that was uploaded as image/jpeg.
+SECURE_CONTENT_TYPE_NOSNIFF = True
+
+# Prevent the admin UI (and any future HTML pages) from being embedded in
+# an iframe on a third-party site — closes clickjacking attack surface.
+X_FRAME_OPTIONS = "DENY"
+
+# Control what Referer header is sent on cross-origin requests.
+# 'strict-origin-when-cross-origin' sends the full URL only to same-origin
+# requests, and only the origin (no path) to cross-origin HTTPS requests.
+SECURE_REFERRER_POLICY = "strict-origin-when-cross-origin"
+
+# HTTP Strict Transport Security: once a browser has seen this header it will
+# only ever connect to this domain over HTTPS, even if the user types http://.
+# 1 year (31 536 000 s) is the recommended preload duration.
+SECURE_HSTS_SECONDS = 31_536_000
+SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+SECURE_HSTS_PRELOAD = True
+
+# Redirect every plain-HTTP request to HTTPS at the Django layer.
+# settings_local.py overrides this to False so the dev server still works.
+SECURE_SSL_REDIRECT = True
+
+# Cookies must only be transmitted over HTTPS and must not be readable by JS.
+SESSION_COOKIE_SECURE = True
+SESSION_COOKIE_HTTPONLY = True
+CSRF_COOKIE_SECURE = True
+CSRF_COOKIE_HTTPONLY = True
 
 CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://localhost:6379/0")
 CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", "redis://localhost:6379/0")
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
+
+# ── Structured logging ────────────────────────────────────────────────────────
+#
+# Why structured logging?
+#   Plain-text logs are hard to query in production log aggregators (Datadog,
+#   CloudWatch, Loki). JSON-formatted lines let you filter by field without
+#   regex. Every log record emitted by the app includes:
+#       timestamp, level, logger name, message, and any extra fields.
+#
+# Format: JSON in production, human-readable in local dev (overridden in
+#         settings_local.py).
+#
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+
+    "formatters": {
+        "json": {
+            "()": "logging.Formatter",
+            # Produces a parseable one-liner. Replace with python-json-logger
+            # for richer structured output (pip install python-json-logger).
+            "format": (
+                '{"time":"%(asctime)s","level":"%(levelname)s",'
+                '"logger":"%(name)s","message":%(message)s}'
+            ),
+            "datefmt": "%Y-%m-%dT%H:%M:%S",
+        },
+        "verbose": {
+            "format": "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+            "datefmt": "%Y-%m-%d %H:%M:%S",
+        },
+    },
+
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "json",
+        },
+    },
+
+    "root": {
+        "handlers": ["console"],
+        "level": LOG_LEVEL,
+    },
+
+    "loggers": {
+        # Django internals — suppress noisy DEBUG output in production
+        "django": {
+            "handlers": ["console"],
+            "level": "WARNING",
+            "propagate": False,
+        },
+        "django.request": {
+            "handlers": ["console"],
+            "level": "ERROR",
+            "propagate": False,
+        },
+        # Our application code — full visibility
+        "verification": {
+            "handlers": ["console"],
+            "level": LOG_LEVEL,
+            "propagate": False,
+        },
+        # Celery worker
+        "celery": {
+            "handlers": ["console"],
+            "level": "INFO",
+            "propagate": False,
+        },
+    },
+}
