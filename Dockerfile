@@ -11,11 +11,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Poetry and build wheels into /app/wheels
-COPY pyproject.toml poetry.lock* /app/
-RUN pip install --no-cache-dir poetry \
-    && poetry config virtualenvs.create false \
-    && poetry install --no-root --no-dev
+# Install application dependencies from requirements.txt (authoritative source)
+COPY requirements.txt /app/
+RUN pip install --no-cache-dir -r requirements.txt
 
 
 # ── Stage 2: runtime ─────────────────────────────────────────────────────────
@@ -41,9 +39,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy installed Python packages from builder stage
 COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
-
-# Install tf-keras separately (heavy, pinned)
-RUN pip install --no-cache-dir tf-keras "tensorflow-cpu>=2.16.1" "numpy<2"
 
 # Copy application code
 COPY --chown=appuser:appgroup . /app

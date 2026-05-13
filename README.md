@@ -132,7 +132,13 @@ Use the `access` token as a `Bearer` header on all subsequent requests.
 Swagger UI is available at:
 
 ```
-http://localhost:8001/api/schema/swagger-ui/
+http://localhost:8001/api/docs/
+```
+
+ReDoc is available at:
+
+```
+http://localhost:8001/api/redoc/
 ```
 
 ---

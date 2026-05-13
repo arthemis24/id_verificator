@@ -211,6 +211,7 @@ class VerificationStatusView(APIView):
                             "verified": False,
                             "verification_result": None,
                             "created_at": "2026-04-15T10:00:00Z",
+                            "updated_at": "2026-04-15T10:00:00Z",
                         },
                         response_only=True,
                     ),

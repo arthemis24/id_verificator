@@ -158,11 +158,3 @@ def ocr_extract_info(doc_path: str) -> dict:
     }
 
 
-def compare_faces(selfie_path: str, doc_face_path: str):
-    """Wrapper around DeepFace.verify for reuse outside Celery tasks."""
-    from deepface import DeepFace
-    try:
-        result = DeepFace.verify(selfie_path, doc_face_path)
-        return result["verified"], result
-    except Exception as e:
-        return False, {"error": str(e)}
