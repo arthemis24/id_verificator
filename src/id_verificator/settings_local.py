@@ -1,6 +1,8 @@
 from .settings import *  # noqa: F401, F403
 import os
 
+DEBUG = True  # enables static file serving by runserver and detailed error pages
+
 # ── SSL / HTTPS — disabled locally, the dev server is plain HTTP ──────────────
 SECURE_SSL_REDIRECT = False
 SESSION_COOKIE_SECURE = False

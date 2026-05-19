@@ -1,23 +1,45 @@
-# Virtual environments
+# ── Secrets — never commit ────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example        # exception: the template is safe to track
+*.pem
+*.p12
+*.key
+secrets/
+
+# ── Python ────────────────────────────────────────────────────────────────────
+*.pyc
+*.pyo
+*.pyd
+__pycache__/
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ── Virtual environments ──────────────────────────────────────────────────────
 .venv/
 venv/
+env/
 
-# Secrets — never commit these
-.env
-*.env
-
-# Django
-*.pyc
-__pycache__/
+# ── Django ────────────────────────────────────────────────────────────────────
 local.db
 media/
 staticfiles/
 
-# Test artifacts
+# ── Test & coverage artifacts ─────────────────────────────────────────────────
 .pytest_cache/
 .coverage
+.coverage.*
 htmlcov/
 
-# Editor
-.vscode/settings.json
+# ── Editor & IDE ──────────────────────────────────────────────────────────────
+.vscode/
 *.code-workspace
+.idea/
+*.swp
+*.swo
+
+# ── OS artifacts ──────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
