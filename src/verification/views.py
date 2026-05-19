@@ -5,7 +5,6 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework import status
 from drf_spectacular.utils import (
     extend_schema,
-    extend_schema_view,
     OpenApiParameter,
     OpenApiExample,
     OpenApiResponse,
@@ -151,7 +150,7 @@ class VerificationView(APIView):
             ),
         },
     )
-    def post(self, request, *args, **kwargs):
+    def post(self, request):
         serializer = VerificationSerializer(
             data=request.data,
             context={"request": request},
@@ -220,18 +219,24 @@ class VerificationStatusView(APIView):
                         value={
                             "id": 42,
                             "verified": True,
+                            "expiry_date": "2030-11-14",
                             "verification_result": {
                                 "verified": True,
+                                "verdict": "MATCH",
+                                "confidence_score": 95.52,
                                 "face_verified": True,
-                                "face_score": 0.21,
+                                "face_score": 0.032,
                                 "ocr_verified": True,
+                                "id_status": "VALID",
                                 "ocr_data": {
                                     "first_name": "RODRIGUE",
                                     "last_name": "MBOG",
                                     "birth_date": "12/01/1990",
+                                    "expiry_date": "14/11/2030",
                                 },
                             },
                             "created_at": "2026-04-15T10:00:00Z",
+                            "updated_at": "2026-04-15T10:00:05Z",
                         },
                         response_only=True,
                     ),
@@ -240,38 +245,50 @@ class VerificationStatusView(APIView):
                         value={
                             "id": 43,
                             "verified": False,
+                            "expiry_date": "2028-06-01",
                             "verification_result": {
                                 "verified": False,
+                                "verdict": "NOT MATCH",
+                                "confidence_score": 18.3,
                                 "face_verified": False,
                                 "face_score": 0.74,
                                 "ocr_verified": True,
+                                "id_status": "VALID",
                                 "ocr_data": {
                                     "first_name": "JEAN",
                                     "last_name": "DUPONT",
                                     "birth_date": "01/01/1985",
+                                    "expiry_date": "01/06/2028",
                                 },
                             },
                             "created_at": "2026-04-15T10:05:00Z",
+                            "updated_at": "2026-04-15T10:05:08Z",
                         },
                         response_only=True,
                     ),
                     OpenApiExample(
-                        "Failed — OCR name mismatch",
+                        "Failed — expired ID",
                         value={
-                            "id": 44,
+                            "id": 45,
                             "verified": False,
+                            "expiry_date": "2023-01-01",
                             "verification_result": {
                                 "verified": False,
+                                "verdict": "NOT MATCH",
+                                "confidence_score": 65.0,
                                 "face_verified": True,
                                 "face_score": 0.18,
-                                "ocr_verified": False,
+                                "ocr_verified": True,
+                                "id_status": "ID_EXPIRED",
                                 "ocr_data": {
                                     "first_name": "JEAN",
                                     "last_name": "DUPONT",
                                     "birth_date": "01/01/1985",
+                                    "expiry_date": "01/01/2023",
                                 },
                             },
                             "created_at": "2026-04-15T10:10:00Z",
+                            "updated_at": "2026-04-15T10:10:06Z",
                         },
                         response_only=True,
                     ),
@@ -291,7 +308,7 @@ class VerificationStatusView(APIView):
             ),
         },
     )
-    def get(self, request, doc_id, *args, **kwargs):
+    def get(self, request, doc_id):
         try:
             doc = Document.objects.get(id=doc_id, user=request.user)
         except Document.DoesNotExist:

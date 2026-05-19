@@ -69,16 +69,42 @@ def _normalize(text: str) -> str:
 
 # ── Label-based field parsers ─────────────────────────────────────────────────
 
+_DATE_PATTERN = (
+    r"(\d{2}[/\-\.]\d{2}[/\-\.]\d{4}"   # DD/MM/YYYY
+    r"|\d{4}[/\-\.]\d{2}[/\-\.]\d{2})"  # YYYY-MM-DD
+)
+
 def _parse_birth_date(text: str):
     """Try to extract a birth date string from OCR text."""
-    for pattern in [
-        r"\b(\d{2}[/\-\.]\d{2}[/\-\.]\d{4})\b",   # DD/MM/YYYY
-        r"\b(\d{4}[/\-\.]\d{2}[/\-\.]\d{2})\b",   # YYYY-MM-DD
-    ]:
-        m = re.search(pattern, text)
-        if m:
-            return m.group(1)
-    return None
+    # Label-based search first (most reliable)
+    label_pattern = (
+        r"(?:Date\s+de\s+naissance|N[eé]e?\s+le|Birth\s*(?:Date|date)?|DOB)[:\s]+"
+        + _DATE_PATTERN
+    )
+    m = re.search(label_pattern, text, re.IGNORECASE)
+    if m:
+        return m.group(1)
+    # Fallback: first bare date in the text
+    m = re.search(r"\b" + _DATE_PATTERN + r"\b", text)
+    return m.group(1) if m else None
+
+
+def _parse_expiry_date(text: str):
+    """
+    Try to extract a document expiry date from OCR text.
+
+    Searches for labelled fields first (most fraud-resistant — user cannot
+    supply a fake value if we read directly from the document image).
+    Returns the raw date string so the caller can decide how to parse it.
+    """
+    label_pattern = (
+        r"(?:Date\s+d['‘’]expir(?:ation)?|Expir(?:y(?:\s+date)?|es?(?:\s+(?:le|on))?)|"
+        r"Valid(?:ity)?\s+(?:until|through|(?:date\s+de\s+)?validit[eé])?|"
+        r"Val\.|Exp\.?|Date\s+de\s+validit[eé])[:\s]+"
+        + _DATE_PATTERN
+    )
+    m = re.search(label_pattern, text, re.IGNORECASE)
+    return m.group(1) if m else None
 
 
 def _parse_name(text: str, field: str):
@@ -151,10 +177,11 @@ def ocr_extract_info(doc_path: str) -> dict:
         }
 
     return {
-        "first_name": _parse_name(raw_text, "first_name"),
-        "last_name":  _parse_name(raw_text, "last_name"),
-        "birth_date": _parse_birth_date(raw_text),
-        "raw_text":   raw_text,
+        "first_name":  _parse_name(raw_text, "first_name"),
+        "last_name":   _parse_name(raw_text, "last_name"),
+        "birth_date":  _parse_birth_date(raw_text),
+        "expiry_date": _parse_expiry_date(raw_text),
+        "raw_text":    raw_text,
     }
 
 

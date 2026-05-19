@@ -14,7 +14,7 @@ Why a service layer?
 
     Each function here:
       - takes plain Python values as arguments
-      - returns plain dicts
+      - returns plain dicts or scalars
       - has no side effects on the database
       - is independently unit-testable with mocks
 """
@@ -22,6 +22,7 @@ Why a service layer?
 from __future__ import annotations
 
 import logging
+from datetime import date, datetime
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -37,8 +38,8 @@ def run_ocr(doc_path: str) -> dict:
     Extract identity fields from a document image or PDF.
 
     Returns:
-        {first_name, last_name, birth_date, raw_text}  — on success
-        {first_name, last_name, birth_date, raw_text, error} — on OCR failure
+        {first_name, last_name, birth_date, expiry_date, raw_text}  — on success
+        {first_name, last_name, birth_date, expiry_date, raw_text, error} — on failure
     """
     from verification.ai_utils import ocr_extract_info
     logger.debug("OCR started: %s", doc_path)
@@ -47,8 +48,9 @@ def run_ocr(doc_path: str) -> dict:
         logger.warning("OCR failed for %s: %s", doc_path, result["error"])
     else:
         logger.debug(
-            "OCR complete: first_name=%s last_name=%s birth_date=%s",
-            result.get("first_name"), result.get("last_name"), result.get("birth_date"),
+            "OCR complete: first_name=%s last_name=%s birth_date=%s expiry_date=%s",
+            result.get("first_name"), result.get("last_name"),
+            result.get("birth_date"), result.get("expiry_date"),
         )
     return result
 
@@ -150,6 +152,78 @@ def _parse_threshold(value) -> float | None:
         return None
 
 
+# ── Expiry & scoring ──────────────────────────────────────────────────────────
+
+def resolve_expiry_date(ocr_expiry_str: str | None, user_expiry_date: date | None) -> date | None:
+    """
+    Determine the expiry date to use for the ID_EXPIRED check.
+
+    OCR-extracted value takes precedence over the user-submitted value.
+    Rationale: a user can lie about an expiry date on the form, but cannot
+    alter the date printed on the physical document that Tesseract reads.
+    Falls back to user-submitted when OCR could not find a date.
+
+    Returns a datetime.date or None.
+    """
+    if ocr_expiry_str:
+        parsed = _parse_date_str(ocr_expiry_str)
+        if parsed:
+            logger.debug("Expiry date resolved from OCR: %s", parsed)
+            return parsed
+    if user_expiry_date:
+        logger.debug("Expiry date resolved from user input: %s", user_expiry_date)
+    return user_expiry_date
+
+
+def _parse_date_str(s: str) -> date | None:
+    """Parse a date string produced by OCR into a datetime.date."""
+    for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%d.%m.%Y", "%m/%d/%Y"):
+        try:
+            return datetime.strptime(s.strip(), fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def check_id_expiry(expiry_date: date | None) -> str:
+    """
+    Classify the document's validity based on its expiry date.
+
+    Returns:
+        "VALID"      — expiry date is today or in the future
+        "ID_EXPIRED" — expiry date is in the past
+        "UNKNOWN"    — no expiry date was available (OCR missed it and user
+                       did not submit one); verification proceeds but expiry
+                       status cannot be determined
+    """
+    if expiry_date is None:
+        return "UNKNOWN"
+    return "ID_EXPIRED" if expiry_date < date.today() else "VALID"
+
+
+def compute_confidence_score(face_score: float, ocr_match: bool, threshold: float = 0.50) -> float:
+    """
+    Combine face distance and OCR result into a single 0–100 confidence score.
+
+    Weighting:
+        Face contributes 70% — continuous signal (distance vs threshold).
+        OCR  contributes 30% — binary pass/fail.
+
+    Formula:
+        face_confidence = max(0, (1 - face_score / threshold)) × 100
+        ocr_confidence  = 100 if ocr_match else 0
+        score           = face_confidence × 0.70 + ocr_confidence × 0.30
+
+    Example:
+        face_score=0.032, threshold=0.50, ocr_match=True
+        → face_confidence = (1 - 0.032/0.50) × 100 = 93.6
+        → score = 93.6 × 0.70 + 100 × 0.30 = 95.52
+    """
+    face_confidence = max(0.0, (1.0 - face_score / threshold)) * 100.0
+    ocr_confidence  = 100.0 if ocr_match else 0.0
+    return round(face_confidence * 0.7 + ocr_confidence * 0.3, 2)
+
+
 # ── Aggregation ───────────────────────────────────────────────────────────────
 
 def build_verification_result(
@@ -157,22 +231,43 @@ def build_verification_result(
     ocr_match: bool,
     ocr_detail: dict,
     face: dict,
+    expiry_date: date | None = None,
 ) -> dict:
     """
-    Assemble the final verification result dict that is stored on the Document
-    and optionally delivered via webhook.
+    Assemble the final verification result stored on the Document and
+    delivered via webhook.
+
+    Fields:
+        verified        — True only if both face and OCR checks passed
+        verdict         — human-readable "MATCH" / "NOT MATCH"
+        confidence_score — 0–100 combining face distance (70%) and OCR (30%)
+        face_verified   — DeepFace decision
+        face_score      — raw ArcFace distance (lower = more similar)
+        ocr_verified    — name match result
+        id_status       — "VALID" | "ID_EXPIRED" | "UNKNOWN"
+        ocr_data        — extracted fields + name check detail
     """
+    from django.conf import settings as django_settings
+
+    threshold = _parse_threshold(getattr(django_settings, "FACE_THRESHOLD", None)) or 0.50
+    verified  = face["verified"] and ocr_match
+    id_status = check_id_expiry(expiry_date)
+
     result: dict = {
-        "verified":      face["verified"] and ocr_match,
-        "face_verified": face["verified"],
-        "face_score":    face["score"],
-        "ocr_verified":  ocr_match,
+        "verified":         verified,
+        "verdict":          "MATCH" if verified else "NOT MATCH",
+        "confidence_score": compute_confidence_score(face["score"], ocr_match, threshold),
+        "face_verified":    face["verified"],
+        "face_score":       face["score"],
+        "ocr_verified":     ocr_match,
+        "id_status":        id_status,
         "ocr_data": {
-            "first_name": ocr_data.get("first_name"),
-            "last_name":  ocr_data.get("last_name"),
-            "birth_date": ocr_data.get("birth_date"),
-            "name_check": ocr_detail,
-            "raw_text":   ocr_data.get("raw_text", ""),
+            "first_name":  ocr_data.get("first_name"),
+            "last_name":   ocr_data.get("last_name"),
+            "birth_date":  ocr_data.get("birth_date"),
+            "expiry_date": ocr_data.get("expiry_date"),
+            "name_check":  ocr_detail,
+            "raw_text":    ocr_data.get("raw_text", ""),
         },
     }
     if face["error"]:

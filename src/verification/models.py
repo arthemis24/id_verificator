@@ -64,6 +64,7 @@ class Document(models.Model):
         upload_to=selfie_upload_path,
         validators=_FILE_VALIDATORS,
     )
+    expiry_date          = models.DateField(null=True, blank=True)
     verified             = models.BooleanField(default=False)
     verification_result  = models.JSONField(null=True, blank=True)
     callback_url         = models.URLField(null=True, blank=True, validators=[validate_no_ssrf])

@@ -13,7 +13,7 @@ from unittest.mock import patch, MagicMock
 from PIL import Image
 
 from verification.models import Document, validate_file_extension, validate_file_size, MAX_FILE_SIZE
-from verification.ai_utils import _parse_birth_date, _parse_name, ocr_extract_info
+from verification.ai_utils import _parse_birth_date, _parse_name, _parse_expiry_date, ocr_extract_info
 from verification.validators import validate_no_ssrf, validate_file_content
 
 
@@ -257,7 +257,7 @@ class TestVerificationAPI:
         data = {
             "first_name": "RODDY",
             "last_name": "MBG",
-            "birth_date": "1980-01-24",
+            "birth_date": "1990-01-12",
             "document_type": "driver_license"
             ""
             "",
@@ -284,7 +284,7 @@ class TestVerificationAPI:
         data = {
             "first_name": "RODDY",
             "last_name": "MBG",
-            "birth_date": "1980-01-24",
+            "birth_date": "1990-01-12",
             "document_type": "driver_license",
             "doc_file": doc_file,
             "selfie_file": selfie_file,
@@ -1013,3 +1013,257 @@ class TestStructuredLogging:
             verify_document(99999)
 
         assert any("not found" in r.message for r in caplog.records)
+
+
+# =========================
+# CONFIDENCE SCORE & EXPIRY TESTS
+# =========================
+
+class TestConfidenceScore:
+    """Unit tests for compute_confidence_score."""
+
+    def test_both_pass_gives_high_score(self):
+        from verification.services import compute_confidence_score
+        score = compute_confidence_score(face_score=0.032, ocr_match=True, threshold=0.50)
+        # face_confidence = (1 - 0.032/0.50)*100 = 93.6 → *0.7 = 65.52
+        # ocr_confidence  = 100 → *0.3 = 30
+        # total = 95.52
+        assert score == pytest.approx(95.52, abs=0.1)
+
+    def test_face_fails_lowers_score(self):
+        from verification.services import compute_confidence_score
+        score = compute_confidence_score(face_score=0.80, ocr_match=True, threshold=0.50)
+        # face_confidence = max(0, (1-0.80/0.50))*100 = 0  → *0.7 = 0
+        # ocr = 100 → *0.3 = 30
+        assert score == pytest.approx(30.0, abs=0.1)
+
+    def test_ocr_fails_lowers_score(self):
+        from verification.services import compute_confidence_score
+        score = compute_confidence_score(face_score=0.10, ocr_match=False, threshold=0.50)
+        # face_confidence = (1-0.10/0.50)*100 = 80 → *0.7 = 56
+        # ocr = 0 → *0.3 = 0
+        assert score == pytest.approx(56.0, abs=0.1)
+
+    def test_both_fail_gives_zero(self):
+        from verification.services import compute_confidence_score
+        score = compute_confidence_score(face_score=0.99, ocr_match=False, threshold=0.50)
+        assert score == 0.0
+
+    def test_perfect_face_score(self):
+        from verification.services import compute_confidence_score
+        score = compute_confidence_score(face_score=0.0, ocr_match=True, threshold=0.50)
+        assert score == pytest.approx(100.0, abs=0.01)
+
+    def test_score_never_exceeds_100(self):
+        from verification.services import compute_confidence_score
+        score = compute_confidence_score(face_score=0.0, ocr_match=True, threshold=0.50)
+        assert score <= 100.0
+
+    def test_score_never_below_zero(self):
+        from verification.services import compute_confidence_score
+        score = compute_confidence_score(face_score=999.0, ocr_match=False, threshold=0.50)
+        assert score >= 0.0
+
+
+class TestIdExpiry:
+    """Unit tests for check_id_expiry and resolve_expiry_date."""
+
+    def test_future_date_is_valid(self):
+        from verification.services import check_id_expiry
+        assert check_id_expiry(date(2099, 12, 31)) == "VALID"
+
+    def test_past_date_is_expired(self):
+        from verification.services import check_id_expiry
+        assert check_id_expiry(date(2020, 1, 1)) == "ID_EXPIRED"
+
+    def test_none_returns_unknown(self):
+        from verification.services import check_id_expiry
+        assert check_id_expiry(None) == "UNKNOWN"
+
+    def test_resolve_prefers_ocr_over_user(self):
+        from verification.services import resolve_expiry_date
+        ocr_str   = "31/12/2030"
+        user_date = date(2025, 6, 1)
+        resolved  = resolve_expiry_date(ocr_str, user_date)
+        assert resolved == date(2030, 12, 31)
+
+    def test_resolve_falls_back_to_user_when_ocr_empty(self):
+        from verification.services import resolve_expiry_date
+        user_date = date(2028, 3, 15)
+        resolved  = resolve_expiry_date(None, user_date)
+        assert resolved == user_date
+
+    def test_resolve_returns_none_when_both_missing(self):
+        from verification.services import resolve_expiry_date
+        assert resolve_expiry_date(None, None) is None
+
+    def test_resolve_falls_back_to_user_when_ocr_unparseable(self):
+        from verification.services import resolve_expiry_date
+        user_date = date(2027, 1, 1)
+        resolved  = resolve_expiry_date("not-a-date", user_date)
+        assert resolved == user_date
+
+    @pytest.mark.parametrize("date_str,expected", [
+        ("31/12/2030", date(2030, 12, 31)),
+        ("31-12-2030", date(2030, 12, 31)),
+        ("2030-12-31", date(2030, 12, 31)),
+        ("31.12.2030", date(2030, 12, 31)),
+    ])
+    def test_parse_date_str_formats(self, date_str, expected):
+        from verification.services import _parse_date_str
+        assert _parse_date_str(date_str) == expected
+
+    def test_parse_date_str_invalid_returns_none(self):
+        from verification.services import _parse_date_str
+        assert _parse_date_str("not-a-date") is None
+
+
+class TestOCRExpiryParsing:
+    """Unit tests for _parse_expiry_date in ai_utils."""
+
+    @pytest.mark.parametrize("text,expected", [
+        ("Expiry: 31/12/2028",          "31/12/2028"),
+        ("Expiry date: 2028-12-31",      "2028-12-31"),
+        ("Date d'expiration: 31/12/2028","31/12/2028"),
+        ("Val. 31/12/2028",              "31/12/2028"),
+        ("Exp. 2028-12-31",              "2028-12-31"),
+        ("Valid until 31/12/2028",       "31/12/2028"),
+    ])
+    def test_extracts_expiry_from_label(self, text, expected):
+        assert _parse_expiry_date(text) == expected
+
+    def test_returns_none_when_no_expiry_label(self):
+        assert _parse_expiry_date("NOM: DUPONT  PRENOM: JEAN") is None
+
+    def test_returns_none_for_empty_text(self):
+        assert _parse_expiry_date("") is None
+
+
+class TestBuildVerificationResultEnriched:
+    """Verify the new fields added to build_verification_result."""
+
+    def _face(self, verified=True, score=0.10, error=None):
+        return {"verified": verified, "score": score, "error": error}
+
+    def _ocr(self, expiry=None):
+        return {
+            "first_name": "A", "last_name": "B",
+            "birth_date": "01/01/1990", "expiry_date": expiry, "raw_text": "",
+        }
+
+    def test_verdict_match_when_verified(self, settings):
+        from verification.services import build_verification_result
+        settings.FACE_THRESHOLD = "0.50"
+        result = build_verification_result(self._ocr(), True, {}, self._face())
+        assert result["verdict"] == "MATCH"
+        assert result["verified"] is True
+
+    def test_verdict_not_match_when_face_fails(self, settings):
+        from verification.services import build_verification_result
+        settings.FACE_THRESHOLD = "0.50"
+        result = build_verification_result(self._ocr(), True, {}, self._face(verified=False, score=0.9))
+        assert result["verdict"] == "NOT MATCH"
+        assert result["verified"] is False
+
+    def test_confidence_score_present_and_valid(self, settings):
+        from verification.services import build_verification_result
+        settings.FACE_THRESHOLD = "0.50"
+        result = build_verification_result(self._ocr(), True, {}, self._face(score=0.0))
+        assert 0.0 <= result["confidence_score"] <= 100.0
+
+    def test_id_status_valid_when_future_expiry(self, settings):
+        from verification.services import build_verification_result
+        settings.FACE_THRESHOLD = "0.50"
+        result = build_verification_result(
+            self._ocr(), True, {}, self._face(), expiry_date=date(2099, 1, 1)
+        )
+        assert result["id_status"] == "VALID"
+
+    def test_id_status_expired_when_past_expiry(self, settings):
+        from verification.services import build_verification_result
+        settings.FACE_THRESHOLD = "0.50"
+        result = build_verification_result(
+            self._ocr(), True, {}, self._face(), expiry_date=date(2020, 1, 1)
+        )
+        assert result["id_status"] == "ID_EXPIRED"
+
+    def test_id_status_unknown_when_no_expiry(self, settings):
+        from verification.services import build_verification_result
+        settings.FACE_THRESHOLD = "0.50"
+        result = build_verification_result(self._ocr(), True, {}, self._face())
+        assert result["id_status"] == "UNKNOWN"
+
+    def test_ocr_expiry_date_included_in_ocr_data(self, settings):
+        from verification.services import build_verification_result
+        settings.FACE_THRESHOLD = "0.50"
+        result = build_verification_result(self._ocr(expiry="31/12/2030"), True, {}, self._face())
+        assert result["ocr_data"]["expiry_date"] == "31/12/2030"
+
+
+class TestWebhookEnrichedPayload:
+    """Verify the webhook delivers the new fields: expiry_date, verdict, confidence_score, id_status."""
+
+    @pytest.fixture
+    def doc(self, db):
+        user = User.objects.create_user(username="webhookuser2", password="pass")
+        return Document.objects.create(
+            user=user,
+            first_name="Test",
+            last_name="User",
+            birth_date=date(1990, 1, 1),
+            expiry_date=date(2030, 6, 15),
+            document_type="passport",
+            doc_file="documents/user_1/doc.pdf",
+            selfie_file="selfies/user_1/selfie.jpg",
+            callback_url="https://webhook.example.com/result",
+        )
+
+    def _mock_response(self):
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        return mock_resp
+
+    def test_webhook_subject_includes_expiry_date(self, doc):
+        from verification.tasks import _dispatch_webhook
+        result = {
+            "verified": True, "verdict": "MATCH", "confidence_score": 90.0,
+            "face_score": 0.05, "ocr_verified": True, "id_status": "VALID",
+        }
+        with patch("urllib.request.urlopen", return_value=self._mock_response()) as mock_open:
+            _dispatch_webhook("https://webhook.example.com/result", doc.id, doc, result)
+
+        body = json.loads(mock_open.call_args[0][0].data.decode())
+        assert body["subject"]["expiry_date"] == "2030-06-15"
+
+    def test_webhook_result_includes_verdict(self, doc):
+        from verification.tasks import _dispatch_webhook
+        result = {
+            "verified": True, "verdict": "MATCH", "confidence_score": 90.0,
+            "face_score": 0.05, "ocr_verified": True, "id_status": "VALID",
+        }
+        with patch("urllib.request.urlopen", return_value=self._mock_response()) as mock_open:
+            _dispatch_webhook("https://webhook.example.com/result", doc.id, doc, result)
+
+        body = json.loads(mock_open.call_args[0][0].data.decode())
+        assert body["result"]["verdict"] == "MATCH"
+        assert body["result"]["confidence_score"] == 90.0
+        assert body["result"]["id_status"] == "VALID"
+
+    def test_webhook_expiry_date_null_when_not_set(self, db):
+        from verification.tasks import _dispatch_webhook
+        user = User.objects.create_user(username="webhookuser3", password="pass")
+        doc_no_expiry = Document.objects.create(
+            user=user, first_name="A", last_name="B",
+            birth_date=date(1990, 1, 1), expiry_date=None,
+            document_type="id_card",
+            doc_file="documents/user_1/doc.pdf",
+            selfie_file="selfies/user_1/selfie.jpg",
+        )
+        result = {"verified": False, "verdict": "NOT MATCH", "id_status": "UNKNOWN"}
+        with patch("urllib.request.urlopen", return_value=self._mock_response()) as mock_open:
+            _dispatch_webhook("https://webhook.example.com/result", doc_no_expiry.id, doc_no_expiry, result)
+
+        body = json.loads(mock_open.call_args[0][0].data.decode())
+        assert body["subject"]["expiry_date"] is None

@@ -19,7 +19,7 @@ class VerificationSerializer(serializers.ModelSerializer):
     class Meta:
         model = Document
         fields = [
-            "first_name", "last_name", "birth_date",
+            "first_name", "last_name", "birth_date", "expiry_date",
             "document_type", "doc_file", "selfie_file", "callback_url",
         ]
 
@@ -31,7 +31,10 @@ class VerificationSerializer(serializers.ModelSerializer):
 class DocumentStatusSerializer(serializers.ModelSerializer):
     class Meta:
         model = Document
-        fields = ["id", "verified", "verification_result", "created_at", "updated_at"]
+        fields = [
+            "id", "verified", "verification_result",
+            "expiry_date", "created_at", "updated_at",
+        ]
         read_only_fields = fields
 
 
