@@ -17,6 +17,8 @@ Both checks run asynchronously via a Celery worker. The client gets a `document_
 - [Local development (without Docker)](#local-development-without-docker)
 - [Environment variables](#environment-variables)
 - [API reference](#api-reference)
+- [Result schema](#result-schema)
+- [Webhook](#webhook)
 - [Verification flow](#verification-flow)
 - [Security](#security)
 - [Running tests](#running-tests)
@@ -265,24 +267,25 @@ GET /api/verify/<document_id>/status/
 
 Returns `404` if the document belongs to a different user.
 
-Response `200`:
+Response `200` — pending:
+```json
+{
+  "id": 42,
+  "verified": false,
+  "expiry_date": null,
+  "verification_result": null,
+  "created_at": "2026-04-15T10:00:00Z",
+  "updated_at": "2026-04-15T10:00:00Z"
+}
+```
+
+Response `200` — completed (see [Result schema](#result-schema) for all fields):
 ```json
 {
   "id": 42,
   "verified": true,
-  "verification_result": {
-    "verified": true,
-    "face_verified": true,
-    "face_score": 0.21,
-    "ocr_verified": true,
-    "ocr_data": {
-      "first_name": "RODDY",
-      "last_name": "MBOGNING",
-      "birth_date": "14/11/1992",
-      "name_check": { "method": "label", "first_name_match": true, "last_name_match": true },
-      "raw_text": "..."
-    }
-  },
+  "expiry_date": "2030-11-14",
+  "verification_result": { "...": "see Result schema below" },
   "created_at": "2026-04-15T10:00:00Z",
   "updated_at": "2026-04-15T10:00:05Z"
 }
@@ -302,6 +305,132 @@ All media files are served through a protected endpoint — direct filesystem pa
 
 ---
 
+## Result schema
+
+Both the status endpoint and the webhook `result` object share the same shape.
+
+```json
+{
+  "verified": true,
+  "verdict": "MATCH",
+  "confidence_score": 93.49,
+  "face_verified": true,
+  "face_score": 0.0322,
+  "ocr_verified": true,
+  "id_status": "VALID",
+  "ocr_data": {
+    "first_name": "RODRIGUE",
+    "last_name": "MBOG",
+    "birth_date": "12/01/1990",
+    "expiry_date": "14/11/2030",
+    "name_check": {
+      "method": "label",
+      "first_name_match": true,
+      "last_name_match": true
+    },
+    "raw_text": "<full Tesseract output>"
+  }
+}
+```
+
+### Field reference
+
+| Field | Type | Description |
+|---|---|---|
+| `verified` | boolean | `true` only when both face and OCR checks pass **and** the ID is not expired |
+| `verdict` | `"MATCH"` \| `"NOT MATCH"` | Human-readable decision |
+| `confidence_score` | float 0–100 | Weighted score: face distance × 70 % + OCR match × 30 % |
+| `face_verified` | boolean | DeepFace ArcFace decision (`distance < threshold`) |
+| `face_score` | float | Raw ArcFace distance — lower means more similar (threshold: `0.50`) |
+| `ocr_verified` | boolean | Name match result (label-based or full-text fallback) |
+| `id_status` | string | `"VALID"` · `"ID_EXPIRED"` · `"UNKNOWN"` (no expiry date found) |
+| `ocr_data.first_name` | string \| null | First name extracted from the document by OCR |
+| `ocr_data.last_name` | string \| null | Last name extracted from the document by OCR |
+| `ocr_data.birth_date` | string \| null | Birth date string as read from the document |
+| `ocr_data.expiry_date` | string \| null | Expiry date string as read from the document |
+| `ocr_data.name_check` | object | Detail of the name comparison (method used + per-field result) |
+| `ocr_data.raw_text` | string | Full raw Tesseract output for debugging |
+
+**`name_check.method`** values:
+
+| Value | Meaning |
+|---|---|
+| `"label"` | OCR found a `NOM` / `PRENOM` label — compared directly after normalisation |
+| `"fulltext"` | No label found — both names searched anywhere in the full text |
+| `"skipped_no_text"` | Tesseract returned an empty string — check skipped (treated as pass) |
+
+**`id_status`** logic:
+
+| Value | Condition |
+|---|---|
+| `"VALID"` | Resolved expiry date ≥ today |
+| `"ID_EXPIRED"` | Resolved expiry date < today |
+| `"UNKNOWN"` | No expiry date in OCR output and none submitted by the user |
+
+> **Expiry date precedence**: the OCR-extracted date always takes priority over the user-submitted `expiry_date` field. This prevents a user from submitting a falsified future date while the physical document has already expired.
+
+---
+
+## Webhook
+
+If `callback_url` was supplied at upload time, the server sends a `POST` request with `Content-Type: application/json` to that URL as soon as verification completes. Delivery is retried up to **3 times** with exponential back-off (1 s → 2 s → 4 s) on network errors. Your endpoint must return any `2xx` status to acknowledge receipt.
+
+### Full webhook payload
+
+```json
+{
+  "document_id": 42,
+  "subject": {
+    "first_name": "RODRIGUE",
+    "last_name": "MBOG",
+    "birth_date": "1990-01-12",
+    "expiry_date": "2030-11-14",
+    "document_type": "passport",
+    "user_id": 3,
+    "username": "rodrigue"
+  },
+  "submitted_at": "2026-04-18T10:00:00+00:00",
+  "result": {
+    "verified": true,
+    "verdict": "MATCH",
+    "confidence_score": 93.49,
+    "face_verified": true,
+    "face_score": 0.0322,
+    "ocr_verified": true,
+    "id_status": "VALID",
+    "ocr_data": {
+      "first_name": "RODRIGUE",
+      "last_name": "MBOG",
+      "birth_date": "12/01/1990",
+      "expiry_date": "14/11/2030",
+      "name_check": {
+        "method": "label",
+        "first_name_match": true,
+        "last_name_match": true
+      },
+      "raw_text": "<full Tesseract output>"
+    }
+  }
+}
+```
+
+### Webhook field reference
+
+| Field | Type | Description |
+|---|---|---|
+| `document_id` | integer | PK of the `Document` record |
+| `subject.first_name` | string | As submitted by the user |
+| `subject.last_name` | string | As submitted by the user |
+| `subject.birth_date` | string | As submitted by the user (`YYYY-MM-DD`) |
+| `subject.expiry_date` | string \| null | Resolved expiry date (`YYYY-MM-DD`) — OCR value takes precedence |
+| `subject.document_type` | string | `passport` · `id_card` · `driver_license` · `residence_permit` |
+| `subject.user_id` | integer | Django user PK |
+| `subject.username` | string | Django username |
+| `submitted_at` | string | ISO 8601 timestamp of the upload |
+| `result` | object | Full result — see [Result schema](#result-schema) |
+
+---
+
 ## Verification flow
 
 ```
@@ -314,18 +443,24 @@ POST /api/verify/
         └── Dispatch verify_document.delay(doc.id)
                 │
                 ├── 1. OCR  (services.run_ocr)
-                │       ├── Extract first_name, last_name, birth_date via Tesseract
+                │       ├── Extract first_name, last_name, birth_date, expiry_date
                 │       └── Cross-check names (label match → full-text fallback)
                 │
                 ├── 2. Face comparison  (services.run_face_verification)
                 │       └── DeepFace.verify(doc_file, selfie_file, model=ArcFace)
                 │
-                ├── 3. Aggregate  (services.build_verification_result)
-                │       verified = face_verified AND ocr_match
-                │       → saved to Document.verified + Document.verification_result
+                ├── 3. Expiry resolution  (services.resolve_expiry_date)
+                │       └── OCR expiry takes precedence over user-submitted value
                 │
-                └── 4. Webhook  (tasks._dispatch_webhook, if callback_url set)
-                        POST result JSON to callback_url
+                ├── 4. Aggregate  (services.build_verification_result)
+                │       ├── verdict          = "MATCH" | "NOT MATCH"
+                │       ├── confidence_score = face×70% + ocr×30%  (0–100)
+                │       ├── id_status        = "VALID" | "ID_EXPIRED" | "UNKNOWN"
+                │       └── verified = face_verified AND ocr_match AND id_status != "ID_EXPIRED"
+                │           → saved to Document.verified + Document.verification_result
+                │
+                └── 5. Webhook  (tasks._dispatch_webhook, if callback_url set)
+                        POST full payload to callback_url
                         Retries up to 3× with exponential back-off (1 s, 2 s, 4 s)
 
 GET /api/verify/<id>/status/  ← client polls until verification_result is not null
@@ -403,3 +538,8 @@ Test classes:
 | `TestVerificationServices` | OCR name matching, face result aggregation (unit, no DB) |
 | `TestWebhookDispatch` | Payload structure, retries, back-off, no-raise on failure |
 | `TestStructuredLogging` | Log level and message correctness via `caplog` |
+| `TestConfidenceScore` | Weighted score formula, boundary values (0/100 clamp) |
+| `TestIdExpiry` | VALID / ID_EXPIRED / UNKNOWN states, expiry resolution precedence |
+| `TestOCRExpiryParsing` | Label patterns (FR/EN), date format variants, no-match fallback |
+| `TestBuildVerificationResultEnriched` | `verdict`, `confidence_score`, `id_status` in aggregated result |
+| `TestWebhookEnrichedPayload` | Full webhook payload including `expiry_date`, `verdict`, `id_status` |
