@@ -17,17 +17,18 @@ from django.core.exceptions import ValidationError
 
 _MAGIC_SIGNATURES: dict[str, list[bytes]] = {
     ".pdf":  [b"%PDF"],
-    ".jpg":  [b"\xff\xd8\xff"],
     ".jpeg": [b"\xff\xd8\xff"],
     ".png":  [b"\x89PNG\r\n\x1a\n"],
 }
 
 _READABLE_NAMES: dict[str, str] = {
     ".pdf":  "PDF",
-    ".jpg":  "JPEG",
     ".jpeg": "JPEG",
     ".png":  "PNG",
 }
+
+# Normalise .jpg → .jpeg so both aliases share the same signature entry.
+_EXT_ALIASES: dict[str, str] = {".jpg": ".jpeg"}
 
 
 def validate_file_content(file) -> None:
@@ -52,7 +53,8 @@ def validate_file_content(file) -> None:
         the file pointer after reading so downstream validators and the ORM
         storage backend receive the complete file.
     """
-    ext = os.path.splitext(file.name)[1].lower()
+    raw_ext = os.path.splitext(file.name)[1].lower()
+    ext = _EXT_ALIASES.get(raw_ext, raw_ext)
     expected_signatures = _MAGIC_SIGNATURES.get(ext)
 
     if expected_signatures is None:

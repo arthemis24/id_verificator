@@ -185,7 +185,7 @@ def _parse_date_str(s: str) -> date | None:
     return None
 
 
-def check_id_expiry(expiry_date: date | None) -> str:
+def check_id_expiry(expiry_date: date | None, today: date | None = None) -> str:
     """
     Classify the document's validity based on its expiry date.
 
@@ -198,7 +198,7 @@ def check_id_expiry(expiry_date: date | None) -> str:
     """
     if expiry_date is None:
         return "UNKNOWN"
-    return "ID_EXPIRED" if expiry_date < date.today() else "VALID"
+    return "ID_EXPIRED" if expiry_date < (today or date.today()) else "VALID"
 
 
 def compute_confidence_score(face_score: float, ocr_match: bool, threshold: float = 0.50) -> float:
@@ -232,6 +232,7 @@ def build_verification_result(
     ocr_detail: dict,
     face: dict,
     expiry_date: date | None = None,
+    threshold: float = 0.50,
 ) -> dict:
     """
     Assemble the final verification result stored on the Document and
@@ -247,9 +248,6 @@ def build_verification_result(
         id_status       — "VALID" | "ID_EXPIRED" | "UNKNOWN"
         ocr_data        — extracted fields + name check detail
     """
-    from django.conf import settings as django_settings
-
-    threshold = _parse_threshold(getattr(django_settings, "FACE_THRESHOLD", None)) or 0.50
     verified  = face["verified"] and ocr_match
     id_status = check_id_expiry(expiry_date)
 

@@ -1,9 +1,36 @@
+from datetime import date, datetime
 from rest_framework import serializers
 from verification.models import Document, DocumentType
 from verification.validators import validate_no_ssrf
 
 
+class FlexibleDateField(serializers.DateField):
+    """
+    DateField that accepts DD-MM-YYYY and DD/MM/YYYY in addition to the
+    default YYYY-MM-DD, normalising all inputs to a date object.
+    """
+    _EXTRA_FORMATS = ("%d-%m-%Y", "%d/%m/%Y")
+
+    def to_internal_value(self, value):
+        if isinstance(value, date):
+            return value
+        for fmt in self._EXTRA_FORMATS:
+            try:
+                return datetime.strptime(str(value), fmt).date()
+            except ValueError:
+                pass
+        return super().to_internal_value(value)
+
+
 class VerificationSerializer(serializers.ModelSerializer):
+    birth_date = FlexibleDateField(
+        help_text="Date of birth. Accepted formats: YYYY-MM-DD, DD-MM-YYYY, DD/MM/YYYY.",
+    )
+    expiry_date = FlexibleDateField(
+        required=False,
+        allow_null=True,
+        help_text="Document expiry date. Accepted formats: YYYY-MM-DD, DD-MM-YYYY, DD/MM/YYYY.",
+    )
     document_type = serializers.ChoiceField(
         choices=DocumentType.choices,
         help_text="Type of identity document. Accepted values: "

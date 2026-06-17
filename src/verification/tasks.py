@@ -15,6 +15,7 @@ import urllib.error
 import urllib.request
 
 from celery import shared_task
+from django.conf import settings as django_settings
 
 from verification.models import Document
 from verification.services import (
@@ -23,6 +24,7 @@ from verification.services import (
     resolve_expiry_date,
     run_face_verification,
     run_ocr,
+    _parse_threshold,
 )
 
 logger = logging.getLogger(__name__)
@@ -41,7 +43,7 @@ def verify_document(document_id: int) -> dict:
     """
     logger.info("verify_document started: document_id=%s", document_id)
     try:
-        doc = Document.objects.get(id=document_id)
+        doc = Document.objects.select_related("user").get(id=document_id)
     except Document.DoesNotExist:
         logger.error("verify_document: document_id=%s not found", document_id)
         return {"verified": False, "error": "Document introuvable"}
@@ -56,11 +58,12 @@ def verify_document(document_id: int) -> dict:
         doc.save()
         return result
 
+    threshold             = _parse_threshold(getattr(django_settings, "FACE_THRESHOLD", None)) or 0.50
     ocr_data              = run_ocr(doc_path)
     ocr_match, ocr_detail = check_ocr_name_match(doc, ocr_data)
     face                  = run_face_verification(doc_path, selfie_path)
     expiry_date           = resolve_expiry_date(ocr_data.get("expiry_date"), doc.expiry_date)
-    result                = build_verification_result(ocr_data, ocr_match, ocr_detail, face, expiry_date)
+    result                = build_verification_result(ocr_data, ocr_match, ocr_detail, face, expiry_date, threshold)
 
     doc.verification_result = result
     doc.verified = result["verified"]

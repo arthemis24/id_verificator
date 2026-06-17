@@ -25,14 +25,15 @@ def validate_file_size(value):
 
 # ── Upload paths ──────────────────────────────────────────────────────────────
 
-def document_upload_path(instance, filename):
-    ext = os.path.splitext(filename)[1].lower()
-    return f"documents/user_{instance.user.id}/{uuid.uuid4().hex}{ext}"
+def _make_upload_path(folder: str):
+    def upload_path(instance, filename):
+        ext = os.path.splitext(filename)[1].lower()
+        return f"{folder}/user_{instance.user.id}/{uuid.uuid4().hex}{ext}"
+    return upload_path
 
 
-def selfie_upload_path(instance, filename):
-    ext = os.path.splitext(filename)[1].lower()
-    return f"selfies/user_{instance.user.id}/{uuid.uuid4().hex}{ext}"
+document_upload_path = _make_upload_path("documents")
+selfie_upload_path   = _make_upload_path("selfies")
 
 
 # ── Document model ────────────────────────────────────────────────────────────

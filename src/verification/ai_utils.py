@@ -1,20 +1,30 @@
+import logging
 import re
 import unicodedata
 import pytesseract
 from PIL import Image
 
+logger = logging.getLogger(__name__)
+
 
 # ── Tesseract setup ───────────────────────────────────────────────────────────
 
+_tesseract_configured = False
+
+
 def _configure_tesseract():
     """Point pytesseract at the binary declared in Django settings (if any)."""
+    global _tesseract_configured
+    if _tesseract_configured:
+        return
     try:
         from django.conf import settings
         cmd = getattr(settings, "TESSERACT_CMD", None)
         if cmd:
             pytesseract.pytesseract.tesseract_cmd = cmd
     except Exception:
-        pass
+        logger.warning("Could not configure Tesseract from Django settings", exc_info=True)
+    _tesseract_configured = True
 
 
 # ── Text extraction ───────────────────────────────────────────────────────────
@@ -107,26 +117,33 @@ def _parse_expiry_date(text: str):
     return m.group(1) if m else None
 
 
+_NAME_VALUE = (
+    r"([A-Z][A-Za-z\-]+(?:[ \t]+[A-Z][A-Za-z\-]+)*?)"
+    r"(?=[ \t]*(?:\n|$)|[ \t]+[a-z\d]|[ \t]+[A-Z][A-Za-z]*(?:[ \t]+[A-Z][A-Za-z]*)?[ \t]*:)"
+)
+# Handles ": ", "\n", and " / Alternate label\n" separators (e.g. "Nom / Surname\n").
+_NAME_SEP = r"(?:(?:[ \t]*/[^\n]*)?\s*[:\n]\s*|[:\s]+)"
+_NAME_PFX = r"(?:\d+\.\s*)?"  # optional numbered prefix: "1. Nom", "2. Prénoms"
+
+_NAME_PATTERNS: dict[str, re.Pattern] = {
+    "first_name": re.compile(
+        _NAME_PFX + r"(?:Pr[eé]noms?|First\s*Names?|PRENOM|FIRST\s*NAME|Given\s*Names?)" + _NAME_SEP + _NAME_VALUE
+    ),
+    "last_name": re.compile(
+        _NAME_PFX + r"(?:\bNom\b|\bNOM\b|Last\s*Name|LAST\s*NAME|Surname|SURNAME)" + _NAME_SEP + _NAME_VALUE
+    ),
+}
+
+
 def _parse_name(text: str, field: str):
     """
     Try to extract a name from a labelled field on the document.
     Supports French and English ID label conventions.
     """
-    # Non-greedy capture of one-or-more capitalized words; stops as soon as
-    # the look-ahead detects end-of-line/string OR the start of another label
-    # (one or two capitalised words immediately followed by ':').
-    _name_value = (
-        r"([A-Z][A-Za-z\-]+(?:[ \t]+[A-Z][A-Za-z\-]+)*?)"
-        r"(?=[ \t]*(?:\n|$)|[ \t]+[A-Z][A-Za-z]*(?:[ \t]+[A-Z][A-Za-z]*)?[ \t]*:)"
-    )
-    labels = {
-        "first_name": r"(?:Pr[eé]nom|First\s*Name|PRENOM|FIRST\s*NAME|Given\s*Name)[:\s]+" + _name_value,
-        "last_name":  r"(?:Nom|Last\s*Name|NOM|LAST\s*NAME|Surname|SURNAME)[:\s]+"         + _name_value,
-    }
-    pattern = labels.get(field)
+    pattern = _NAME_PATTERNS.get(field)
     if not pattern:
         return None
-    m = re.search(pattern, text)
+    m = pattern.search(text)
     return m.group(1) if m else None
 
 
